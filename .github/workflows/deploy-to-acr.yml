@@ -1,0 +1,62 @@
+name: Build and push to Azure Container Registry
+
+on:
+  push:
+    branches: [ 'main' ]
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Log in to ACR
+      uses: docker/login-action@v2
+      with:
+        registry: ${{ secrets.ACR_REGISTRY }}
+        username: ${{ secrets.ACR_USERNAME }}
+        password: ${{ secrets.ACR_PASSWORD }}
+
+    - name: Build image from src (build context limited to src/)
+      run: |
+        set -e
+        IMAGE="${{ secrets.ACR_REGISTRY }}/app:${{ github.sha }}"
+        docker build -t "$IMAGE" ./src
+        echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+
+    - name: Inject .env from secret into image and push
+      env:
+        IMAGE: ${{ env.IMAGE }}
+      run: |
+        set -e
+        # Create a temporary local .env from the ENV secret (never checked in)
+        printf '%s' "${{ secrets.ENV }}" > .env
+
+        # Start a short-lived container from the built image, copy .env into it, commit new image
+        docker run -d --name tmpcontainer "$IMAGE" tail -f /dev/null
+        docker exec tmpcontainer mkdir -p /app
+        docker cp .env tmpcontainer:/app/.env
+        docker commit tmpcontainer "$IMAGE"
+        docker rm -f tmpcontainer
+
+        # Clean up the local .env so it is never left on the runner filesystem
+        shred -u .env || rm -f .env
+
+        # Push the image (now containing /app/.env)
+        docker push "$IMAGE"
+
+    - name: Output pushed image
+      run: echo "Pushed ${{ env.IMAGE }}"
+
+# Required repository secrets:
+# - ACR_REGISTRY  (e.g. myregistry.azurecr.io)
+# - ACR_USERNAME
+# - ACR_PASSWORD
+# - ENV  (the literal contents you want in the container's /app/.env)
+#
+# Notes:
+# - The Dockerfile is expected to be located at src/Dockerfile and the build context is ./src so only files under src/ are used for the build.
+# - The .env file is created at runtime from the ENV secret and removed immediately; it is not checked into the repo or printed to logs.
+# - If you prefer authenticating with an Azure service principal, replace the login step with the Azure login flow and use 'az acr login' instead.
